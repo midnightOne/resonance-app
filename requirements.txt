@@ -1,0 +1,9 @@
+sounddevice
+numpy
+keyboard
+pyperclip
+pyautogui
+requests
+Pillow
+python-dotenv
+miniaudio

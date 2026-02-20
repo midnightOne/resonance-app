@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller output
+dist/
+build/
+*.spec.bak
+
+# IDE / tool sessions
+.claude/
+.vscode/
+
+# Root-level MP3 originals (actual files live in whisper_flow/sounds/)
+/*.mp3
