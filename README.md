@@ -9,7 +9,7 @@ A lightweight Windows desktop app for hands-free voice dictation. Hold a hotkey,
 - **Session history** — scrollable list of all transcriptions with per-entry Copy buttons
 - **Persistent log** — transcripts saved to `~/.resonance/history.jsonl` with metadata (timestamp, app, duration)
 - **Cost tracking** — running USD total based on Whisper API pricing, shown in the footer
-- **Audio cues** — MP3 sounds on start / stop / error (customisable files in `whisper_flow/sounds/`)
+- **Audio cues** — MP3 sounds on start / stop / error (customisable files in `resonance/sounds/`)
 - **Audio device selection** — choose mic input and audio output independently
 - **Start with Windows** — optional registry entry for auto-launch
 - **Standalone exe** — ships as a single `Resonance.exe` built with PyInstaller

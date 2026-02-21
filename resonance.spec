@@ -12,7 +12,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        ('whisper_flow/sounds/*.mp3', 'sounds'),
+        ('resonance/sounds/*.mp3', 'sounds'),
     ],
     hiddenimports=[
         'keyboard._winkeyboard',

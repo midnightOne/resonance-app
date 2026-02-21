@@ -15,5 +15,5 @@ build/
 .claude/
 .vscode/
 
-# Root-level MP3 originals (actual files live in whisper_flow/sounds/)
+# Root-level MP3 originals (actual files live in resonance/sounds/)
 /*.mp3
