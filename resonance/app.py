@@ -552,6 +552,7 @@ class App:
         self._build_day_selector()
         self._build_history_area()
         self._build_footer()
+        self.root.bind("<Control-c>", lambda _: self._copy_last())
 
     def _build_header(self):
         header = tk.Frame(self.root, bg=BG, pady=10)
@@ -775,6 +776,10 @@ class App:
 
     def _on_hotkey_release(self):
         if self._status != S_RECORDING:
+            return
+        if time.time() - self._record_start < 1.0:
+            self._recorder.stop()
+            self._q.put(("status", S_IDLE))
             return
         self._q.put(("status", S_PROCESSING))
         self._q.put(("stop_recording",))
