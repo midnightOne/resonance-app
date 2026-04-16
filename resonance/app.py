@@ -523,6 +523,9 @@ class App:
         self._record_start: float = 0.0
         self._status = S_IDLE
         self._history: list[HistoryEntry] = []
+        self._day_entries: dict[str, list[tuple[str, str]]] = {}
+        self._selected_date: str = datetime.now().strftime("%Y-%m-%d")
+        self._latest_text: str | None = None
         self._blink_job = None
         self._total_cost: float = 0.0
 
@@ -546,6 +549,7 @@ class App:
 
         self._build_header()
         self._build_status_bar()
+        self._build_day_selector()
         self._build_history_area()
         self._build_footer()
 
@@ -593,6 +597,81 @@ class App:
                                       font=("Consolas", 8))
         self._hotkey_label.pack(side="right")
 
+    def _build_day_selector(self):
+        bar = tk.Frame(self.root, bg=BG2, pady=2)
+        bar.pack(fill="x")
+        self._day_canvas = tk.Canvas(bar, bg=BG2, height=26, highlightthickness=0)
+        self._day_canvas.pack(fill="x", padx=4)
+        self._day_btn_frame = tk.Frame(self._day_canvas, bg=BG2)
+        self._day_canvas.create_window((0, 0), window=self._day_btn_frame, anchor="nw")
+        self._day_btn_frame.bind(
+            "<Configure>",
+            lambda _: self._day_canvas.configure(
+                scrollregion=self._day_canvas.bbox("all")))
+        self._day_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self._day_canvas.xview_scroll(
+                int(-1 * (e.delta / 120)), "units"))
+        self._day_buttons: dict[str, tk.Button] = {}
+
+    def _refresh_day_buttons(self):
+        for btn in self._day_buttons.values():
+            btn.destroy()
+        self._day_buttons.clear()
+        today = datetime.now().strftime("%Y-%m-%d")
+        for date_str in sorted(self._day_entries.keys()):
+            if date_str == today:
+                label = "Today"
+            else:
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    label = dt.strftime("%b %d")
+                except ValueError:
+                    label = date_str
+            selected = date_str == self._selected_date
+            btn = tk.Button(
+                self._day_btn_frame, text=label,
+                fg=BG if selected else TEXT_DIM,
+                bg=GREEN if selected else ACCENT,
+                relief="flat", bd=0, padx=10, pady=2,
+                font=("Segoe UI", 8, "bold" if selected else ""),
+                cursor="hand2",
+                command=lambda d=date_str: self._show_day(d),
+            )
+            btn.pack(side="left", padx=2)
+            self._day_buttons[date_str] = btn
+        # Scroll to show selected day's button
+        self._day_canvas.update_idletasks()
+        self._day_canvas.xview_moveto(1.0)
+
+    def _update_day_button_styles(self):
+        for date_str, btn in self._day_buttons.items():
+            selected = date_str == self._selected_date
+            btn.config(
+                fg=BG if selected else TEXT_DIM,
+                bg=GREEN if selected else ACCENT,
+                font=("Segoe UI", 8, "bold" if selected else ""),
+            )
+
+    def _show_day(self, date_str: str):
+        for e in self._history:
+            e.destroy()
+        self._history.clear()
+        self._selected_date = date_str
+        self._update_day_button_styles()
+        entries = self._day_entries.get(date_str, [])
+        if not entries:
+            if not self._placeholder.winfo_ismapped():
+                self._placeholder.pack(pady=60)
+            return
+        if self._placeholder.winfo_ismapped():
+            self._placeholder.pack_forget()
+        for ts, text in entries:
+            entry = HistoryEntry(self._history_frame, ts, text)
+            entry.pack(fill="x", padx=8, pady=2)
+            self._history.append(entry)
+        self.root.after_idle(self._scroll_to_bottom)
+
     def _build_history_area(self):
         container = tk.Frame(self.root, bg=BG)
         container.pack(fill="both", expand=True, padx=0, pady=0)
@@ -627,10 +706,10 @@ class App:
         footer = tk.Frame(self.root, bg=BG2, pady=6)
         footer.pack(fill="x", side="bottom")
 
-        copy_last_btn = tk.Button(footer, text="Copy Last", fg=TEXT, bg=ACCENT,
-                                  relief="flat", bd=0, padx=12, pady=4,
-                                  font=("Segoe UI", 9), cursor="hand2",
-                                  activebackground=GREEN, activeforeground=BG,
+        copy_last_btn = tk.Button(footer, text="Copy Latest", fg=BG, bg=GREEN,
+                                  relief="flat", bd=0, padx=14, pady=4,
+                                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                                  activebackground=ACCENT, activeforeground=TEXT,
                                   command=self._copy_last)
         copy_last_btn.pack(side="left", padx=10)
 
@@ -800,9 +879,7 @@ class App:
         except Exception:
             return
 
-        # Sum costs from every record in the full log (not just the displayed slice)
         for record in records:
-            # cost_usd is stored directly if available, otherwise recalculate
             cost = record.get("cost_usd")
             if cost is None:
                 cost = _calc_cost(
@@ -810,22 +887,28 @@ class App:
                     record.get("model", "whisper-1"),
                 )
             self._total_cost += cost
-        self._update_cost_display()
 
-        # Display at most the 300 most recent entries
-        for record in records[-300:]:
             text = record.get("text", "")
             if not text:
                 continue
             try:
                 dt = datetime.fromisoformat(record["timestamp"])
-                ts = dt.strftime("%m-%d %H:%M")
+                date_key = dt.strftime("%Y-%m-%d")
+                ts = dt.strftime("%H:%M")
             except Exception:
+                date_key = record.get("date", "unknown")
                 ts = record.get("time", "??:??")
-            self._add_history(text, ts=ts)
+            self._day_entries.setdefault(date_key, []).append((ts, text))
+            self._latest_text = text
 
-        # Scroll to bottom after all entries are rendered
-        self.root.after(100, lambda: self._canvas.yview_moveto(1.0))
+        self._update_cost_display()
+        self._refresh_day_buttons()
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today in self._day_entries:
+            self._show_day(today)
+        elif self._day_entries:
+            self._show_day(sorted(self._day_entries.keys())[-1])
 
     def _save_transcript(self, text: str, pasted: bool) -> float:
         """Append a JSONL record to ~/.resonance/history.jsonl.
@@ -903,37 +986,53 @@ class App:
         self._dot.itemconfig(self._dot_oval, fill=colour)
         self._blink_job = self.root.after(500, lambda: self._blink(not visible))
 
-    def _add_history(self, text: str, is_error: bool = False, ts: str | None = None):
-        if self._placeholder.winfo_ismapped():
-            self._placeholder.pack_forget()
-
+    def _add_history(self, text: str, is_error: bool = False,
+                     ts: str | None = None):
+        today = datetime.now().strftime("%Y-%m-%d")
         if ts is None:
             ts = datetime.now().strftime("%H:%M:%S")
-        entry = HistoryEntry(self._history_frame, ts, text)
-        entry.pack(fill="x", padx=8, pady=2)
-        self._history.append(entry)
 
-        # Scroll to bottom (skip during bulk load – caller handles it)
-        self._canvas.update_idletasks()
-        self._canvas.yview_moveto(1.0)
+        self._day_entries.setdefault(today, []).append((ts, text))
+        self._latest_text = text
+
+        if today not in self._day_buttons:
+            self._refresh_day_buttons()
+
+        if self._selected_date != today:
+            self._show_day(today)
+        else:
+            if self._placeholder.winfo_ismapped():
+                self._placeholder.pack_forget()
+            entry = HistoryEntry(self._history_frame, ts, text)
+            entry.pack(fill="x", padx=8, pady=2)
+            self._history.append(entry)
+            self._scroll_to_bottom()
 
     def _clear_history(self):
         for e in self._history:
             e.destroy()
         self._history.clear()
+        self._day_entries.clear()
+        self._latest_text = None
+        self._refresh_day_buttons()
         if not self._placeholder.winfo_ismapped():
             self._placeholder.pack(pady=60)
 
     def _copy_last(self):
-        if self._history:
-            pyperclip.copy(self._history[-1].text)
+        if self._latest_text:
+            pyperclip.copy(self._latest_text)
 
     def _copy_all(self):
-        if self._history:
-            combined = "\n".join(e.text for e in self._history)
-            pyperclip.copy(combined)
+        entries = self._day_entries.get(self._selected_date, [])
+        if entries:
+            pyperclip.copy("\n".join(text for _, text in entries))
 
     # ── canvas scroll helpers ─────────────────────────────────────────────────
+
+    def _scroll_to_bottom(self):
+        self._canvas.update_idletasks()
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        self._canvas.yview_moveto(1.0)
 
     def _on_frame_configure(self, _event=None):
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
