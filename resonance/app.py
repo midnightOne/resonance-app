@@ -602,6 +602,7 @@ class App:
         self._foreground_hwnd: int = 0
         self._target_app: dict = {}
         self._record_start: float = 0.0
+        self._recording_active: bool = False
         self._status = S_IDLE
         self._history: list[HistoryEntry] = []
         self._day_entries: dict[str, list[tuple[str, str, str | None]]] = {}
@@ -848,29 +849,22 @@ class App:
     # ── hotkey callbacks (called from keyboard thread) ────────────────────────
 
     def _on_hotkey_press(self):
-        if self._status not in (S_IDLE, S_ERROR):
+        if self._recording_active:
             return
-        # Capture the currently focused window BEFORE we do anything
+        self._recording_active = True
         self._foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
         self._target_app = _get_window_info(self._foreground_hwnd)
         self._record_start = time.time()
-        self._q.put(("status", S_RECORDING))
         self._q.put(("start_recording",))
 
     def _on_hotkey_release(self):
-        if self._status != S_RECORDING:
+        if not self._recording_active:
             return
+        self._recording_active = False
         if time.time() - self._record_start < 1.0:
-            wav = self._recorder.stop()
-            if wav and os.path.exists(wav):
-                try:
-                    os.unlink(wav)
-                except OSError:
-                    pass
-            self._q.put(("status", S_IDLE))
-            return
-        self._q.put(("status", S_PROCESSING))
-        self._q.put(("stop_recording",))
+            self._q.put(("cancel_recording",))
+        else:
+            self._q.put(("stop_recording",))
 
     # ── queue drain (main thread) ─────────────────────────────────────────────
 
@@ -893,10 +887,21 @@ class App:
             self._set_status(msg[1])
 
         elif kind == "start_recording":
+            self._set_status(S_RECORDING)
             self._recorder.start(device=self.cfg.get("audio_device"))
             _play_cue("start", device=self.cfg.get("audio_output_device"))
 
+        elif kind == "cancel_recording":
+            wav = self._recorder.stop()
+            if wav and os.path.exists(wav):
+                try:
+                    os.unlink(wav)
+                except OSError:
+                    pass
+            self._set_status(S_IDLE)
+
         elif kind == "stop_recording":
+            self._set_status(S_PROCESSING)
             _play_cue("stop", device=self.cfg.get("audio_output_device"))
             self._worker_thread = threading.Thread(
                 target=self._transcribe_worker,
@@ -925,7 +930,7 @@ class App:
             self._set_status(S_ERROR)
             _play_cue("error", device=self.cfg.get("audio_output_device"))
             self._save_transcript(f"[ERROR] {err}", pasted=False, wav_cache=wav_path)
-            self.root.after(3000, lambda: self._set_status(S_IDLE))
+            self.root.after(3000, self._clear_error_status)
 
     # ── worker thread ─────────────────────────────────────────────────────────
 
@@ -1110,6 +1115,10 @@ class App:
             pyperclip.copy(text)
 
     # ── UI helpers ────────────────────────────────────────────────────────────
+
+    def _clear_error_status(self):
+        if self._status == S_ERROR:
+            self._set_status(S_IDLE)
 
     def _set_status(self, status: str):
         self._status = status
