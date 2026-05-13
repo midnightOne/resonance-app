@@ -297,10 +297,24 @@ class HotkeyMonitor:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HistoryEntry(tk.Frame):
-    def __init__(self, parent, timestamp: str, text: str,
-                 on_retry=None, **kw):
+    """Single transcription row in the history panel.
+
+    Callbacks (all optional):
+        on_retry  – re-submit cached audio for transcription
+        on_delete – remove this entry from history
+        on_play   – open cached audio in external player
+    """
+    def __init__(self, parent, timestamp: str, text: str, *,
+                 on_retry=None, on_delete=None, on_play=None, **kw):
         super().__init__(parent, bg=BG2, pady=4, padx=6, **kw)
         self.text = text
+        self._menu_actions: list[tuple[str, callable]] = []
+        if on_retry:
+            self._menu_actions.append(("Retry transcription", on_retry))
+        if on_play:
+            self._menu_actions.append(("Play audio", on_play))
+        if on_delete:
+            self._menu_actions.append(("Delete entry", on_delete))
 
         top = tk.Frame(self, bg=BG2)
         top.pack(fill="x")
@@ -309,20 +323,20 @@ class HistoryEntry(tk.Frame):
                             font=("Consolas", 8))
         ts_label.pack(side="left")
 
+        if self._menu_actions:
+            dots_btn = tk.Button(top, text="···", fg=TEXT_DIM, bg=BG2,
+                                 relief="flat", bd=0, padx=4, pady=0,
+                                 font=("Consolas", 10), cursor="hand2",
+                                 activebackground=ACCENT, activeforeground=TEXT,
+                                 command=lambda: self._show_menu(dots_btn))
+            dots_btn.pack(side="left", padx=(4, 0))
+
         copy_btn = tk.Button(top, text="Copy", fg=TEXT, bg=ACCENT,
                              relief="flat", bd=0, padx=8, pady=1,
                              font=("Segoe UI", 8), cursor="hand2",
                              activebackground=GREEN, activeforeground=BG,
                              command=self._copy)
         copy_btn.pack(side="right")
-
-        if on_retry:
-            retry_btn = tk.Button(top, text="Retry", fg=BG, bg=YELLOW,
-                                  relief="flat", bd=0, padx=8, pady=1,
-                                  font=("Segoe UI", 8, "bold"), cursor="hand2",
-                                  activebackground=GREEN, activeforeground=BG,
-                                  command=on_retry)
-            retry_btn.pack(side="right", padx=(0, 4))
 
         body = tk.Label(self, text=text, fg=TEXT, bg=BG2,
                         wraplength=360, justify="left",
@@ -334,6 +348,16 @@ class HistoryEntry(tk.Frame):
 
     def _copy(self):
         pyperclip.copy(self.text)
+
+    def _show_menu(self, anchor_widget):
+        menu = tk.Menu(self, tearoff=0, bg=BG2, fg=TEXT,
+                       activebackground=ACCENT, activeforeground=TEXT,
+                       font=("Segoe UI", 9), relief="flat", bd=1)
+        for label, cmd in self._menu_actions:
+            menu.add_command(label=label, command=cmd)
+        x = anchor_widget.winfo_rootx()
+        y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
+        menu.tk_popup(x, y)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -725,11 +749,9 @@ class App:
             return
         if self._placeholder.winfo_ismapped():
             self._placeholder.pack_forget()
-        for ts, text, wav in entries:
-            on_retry = None
-            if wav and os.path.exists(wav) and text.startswith("[ERROR]"):
-                on_retry = lambda w=wav: self._retry_transcription(w)
-            entry = HistoryEntry(self._history_frame, ts, text, on_retry=on_retry)
+        for idx, (ts, text, wav) in enumerate(entries):
+            kw = self._entry_callbacks(date_str, idx, text, wav)
+            entry = HistoryEntry(self._history_frame, ts, text, **kw)
             entry.pack(fill="x", padx=8, pady=2)
             self._history.append(entry)
         self.root.after_idle(self._scroll_to_bottom)
@@ -885,6 +907,8 @@ class App:
         elif kind == "result":
             text = msg[1]
             wav_path = msg[2] if len(msg) > 2 else None
+            if wav_path:
+                self._remove_error_for_wav(wav_path)
             pasted = self.cfg.get("auto_paste", True)
             self._add_history(text, wav_path=wav_path)
             self._set_status(S_IDLE)
@@ -1132,13 +1156,76 @@ class App:
         else:
             if self._placeholder.winfo_ismapped():
                 self._placeholder.pack_forget()
-            on_retry = None
-            if wav_path and is_error:
-                on_retry = lambda: self._retry_transcription(wav_path)
-            entry = HistoryEntry(self._history_frame, ts, text, on_retry=on_retry)
+            idx = len(self._day_entries[today]) - 1
+            kw = self._entry_callbacks(today, idx, text, wav_path)
+            entry = HistoryEntry(self._history_frame, ts, text, **kw)
             entry.pack(fill="x", padx=8, pady=2)
             self._history.append(entry)
             self._scroll_to_bottom()
+
+    def _entry_callbacks(self, date_str: str, idx: int,
+                         text: str, wav: str | None) -> dict:
+        kw: dict = {}
+        wav_exists = wav and os.path.exists(wav)
+        if wav_exists and text.startswith("[ERROR]"):
+            kw["on_retry"] = lambda w=wav: self._retry_transcription(w)
+        if wav_exists:
+            kw["on_play"] = lambda w=wav: os.startfile(w)
+        kw["on_delete"] = lambda d=date_str, i=idx: self._delete_entry(d, i)
+        return kw
+
+    def _delete_entry(self, date_str: str, idx: int):
+        entries = self._day_entries.get(date_str)
+        if not entries or idx >= len(entries):
+            return
+        entries.pop(idx)
+        if not entries:
+            del self._day_entries[date_str]
+            self._refresh_day_buttons()
+        self._rewrite_history_jsonl()
+        self._show_day(self._selected_date)
+
+    def _remove_error_for_wav(self, wav_path: str):
+        """Remove the error entry that triggered a retry for this wav_path."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        entries = self._day_entries.get(today, [])
+        for i, (ts, text, wav) in enumerate(entries):
+            if wav == wav_path and text.startswith("[ERROR]"):
+                entries.pop(i)
+                self._rewrite_history_jsonl()
+                if self._selected_date == today:
+                    self._show_day(today)
+                return
+
+    def _rewrite_history_jsonl(self):
+        """Rewrite ~/.resonance/history.jsonl from in-memory day_entries."""
+        log_file = cfg.CONFIG_DIR / "history.jsonl"
+        try:
+            records: list[dict] = []
+            if log_file.exists():
+                with open(log_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                records.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+            kept_texts: set[tuple[str, str]] = set()
+            for entries in self._day_entries.values():
+                for ts, text, wav in entries:
+                    kept_texts.add((text, wav or ""))
+            filtered = []
+            for r in records:
+                key = (r.get("text", ""), r.get("wav_cache", ""))
+                if key in kept_texts:
+                    filtered.append(r)
+                    kept_texts.discard(key)
+            with open(log_file, "w", encoding="utf-8") as f:
+                for r in filtered:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _clear_history(self):
         for e in self._history:
