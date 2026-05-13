@@ -18,6 +18,7 @@ import json
 import math
 import os
 import queue
+import shutil
 import sys
 import tempfile
 import threading
@@ -296,7 +297,8 @@ class HotkeyMonitor:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class HistoryEntry(tk.Frame):
-    def __init__(self, parent, timestamp: str, text: str, **kw):
+    def __init__(self, parent, timestamp: str, text: str,
+                 on_retry=None, **kw):
         super().__init__(parent, bg=BG2, pady=4, padx=6, **kw)
         self.text = text
 
@@ -313,6 +315,14 @@ class HistoryEntry(tk.Frame):
                              activebackground=GREEN, activeforeground=BG,
                              command=self._copy)
         copy_btn.pack(side="right")
+
+        if on_retry:
+            retry_btn = tk.Button(top, text="Retry", fg=BG, bg=YELLOW,
+                                  relief="flat", bd=0, padx=8, pady=1,
+                                  font=("Segoe UI", 8, "bold"), cursor="hand2",
+                                  activebackground=GREEN, activeforeground=BG,
+                                  command=on_retry)
+            retry_btn.pack(side="right", padx=(0, 4))
 
         body = tk.Label(self, text=text, fg=TEXT, bg=BG2,
                         wraplength=360, justify="left",
@@ -382,6 +392,8 @@ class SettingsPanel(tk.Toplevel):
         self._auto_paste = tk.BooleanVar(value=c["auto_paste"])
         self._always_on_top = tk.BooleanVar(value=c["always_on_top"])
         self._start_with_windows = tk.BooleanVar(value=_get_startup_enabled())
+        self._cache_max_mb = tk.StringVar(value=str(c.get("audio_cache_max_mb", 500)))
+        self._cache_days = tk.StringVar(value=str(c.get("audio_cache_days", 7)))
 
         # Device lists
         self._in_device_list: list[tuple[int | None, str]] = (
@@ -461,6 +473,26 @@ class SettingsPanel(tk.Toplevel):
                        activebackground=BG, selectcolor=ENTRY_BG,
                        font=("Segoe UI", 9)).pack(side="left")
 
+        # ── Audio cache settings ────────────────────────────────────────────
+        tk.Label(self, text="Audio Cache", fg=TEXT, bg=BG,
+                 font=("Segoe UI", 10, "bold")).pack(pady=(10, 2))
+
+        cache_mb_frame = tk.Frame(self, bg=BG)
+        cache_mb_frame.pack(fill="x", **pad)
+        tk.Label(cache_mb_frame, text="Max size (MB)", fg=TEXT_DIM, bg=BG,
+                 width=14, anchor="w", font=("Segoe UI", 9)).pack(side="left")
+        tk.Entry(cache_mb_frame, textvariable=self._cache_max_mb, bg=ENTRY_BG,
+                 fg=TEXT, insertbackground=TEXT, relief="flat",
+                 font=("Consolas", 10), width=8).pack(side="left")
+
+        cache_days_frame = tk.Frame(self, bg=BG)
+        cache_days_frame.pack(fill="x", **pad)
+        tk.Label(cache_days_frame, text="Keep (days)", fg=TEXT_DIM, bg=BG,
+                 width=14, anchor="w", font=("Segoe UI", 9)).pack(side="left")
+        tk.Entry(cache_days_frame, textvariable=self._cache_days, bg=ENTRY_BG,
+                 fg=TEXT, insertbackground=TEXT, relief="flat",
+                 font=("Consolas", 10), width=8).pack(side="left")
+
         tk.Frame(self, height=1, bg=ACCENT).pack(fill="x", pady=(10, 0))
 
         btn_row = tk.Frame(self, bg=BG)
@@ -501,6 +533,14 @@ class SettingsPanel(tk.Toplevel):
         c["always_on_top"] = self._always_on_top.get()
         c["audio_device"]        = self._resolve_device(self._in_dev_var,  self._in_device_list)
         c["audio_output_device"] = self._resolve_device(self._out_dev_var, self._out_device_list)
+        try:
+            c["audio_cache_max_mb"] = int(self._cache_max_mb.get())
+        except ValueError:
+            pass
+        try:
+            c["audio_cache_days"] = int(self._cache_days.get())
+        except ValueError:
+            pass
         cfg.save(c)
         _set_startup(self._start_with_windows.get())
         self.app.apply_settings()
@@ -523,13 +563,14 @@ class App:
         self._record_start: float = 0.0
         self._status = S_IDLE
         self._history: list[HistoryEntry] = []
-        self._day_entries: dict[str, list[tuple[str, str]]] = {}
+        self._day_entries: dict[str, list[tuple[str, str, str | None]]] = {}
         self._selected_date: str = datetime.now().strftime("%Y-%m-%d")
         self._latest_text: str | None = None
         self._blink_job = None
         self._total_cost: float = 0.0
 
         _load_sounds()
+        self._prune_audio_cache()
         self._build_ui()
         self._load_history_from_disk()
         self.apply_settings()
@@ -667,8 +708,11 @@ class App:
             return
         if self._placeholder.winfo_ismapped():
             self._placeholder.pack_forget()
-        for ts, text in entries:
-            entry = HistoryEntry(self._history_frame, ts, text)
+        for ts, text, wav in entries:
+            on_retry = None
+            if wav and os.path.exists(wav) and text.startswith("[ERROR]"):
+                on_retry = lambda w=wav: self._retry_transcription(w)
+            entry = HistoryEntry(self._history_frame, ts, text, on_retry=on_retry)
             entry.pack(fill="x", padx=8, pady=2)
             self._history.append(entry)
         self.root.after_idle(self._scroll_to_bottom)
@@ -778,7 +822,12 @@ class App:
         if self._status != S_RECORDING:
             return
         if time.time() - self._record_start < 1.0:
-            self._recorder.stop()
+            wav = self._recorder.stop()
+            if wav and os.path.exists(wav):
+                try:
+                    os.unlink(wav)
+                except OSError:
+                    pass
             self._q.put(("status", S_IDLE))
             return
         self._q.put(("status", S_PROCESSING))
@@ -818,51 +867,99 @@ class App:
 
         elif kind == "result":
             text = msg[1]
+            wav_path = msg[2] if len(msg) > 2 else None
             pasted = self.cfg.get("auto_paste", True)
-            self._add_history(text)
+            self._add_history(text, wav_path=wav_path)
             self._set_status(S_IDLE)
             if pasted:
                 self._paste_text(text)
-            cost = self._save_transcript(text, pasted=pasted)
+            cost = self._save_transcript(text, pasted=pasted, wav_cache=wav_path)
             self._total_cost += cost
             self._update_cost_display()
 
         elif kind == "error":
             err = msg[1]
-            self._add_history(f"[ERROR] {err}", is_error=True)
+            wav_path = msg[2] if len(msg) > 2 else None
+            self._add_history(f"[ERROR] {err}", is_error=True, wav_path=wav_path)
             self._set_status(S_ERROR)
             _play_cue("error", device=self.cfg.get("audio_output_device"))
-            self._save_transcript(f"[ERROR] {err}", pasted=False)
+            self._save_transcript(f"[ERROR] {err}", pasted=False, wav_cache=wav_path)
             self.root.after(3000, lambda: self._set_status(S_IDLE))
 
     # ── worker thread ─────────────────────────────────────────────────────────
 
     def _transcribe_worker(self):
         wav_path = None
+        cache_path = None
         try:
             wav_path = self._recorder.stop()
             if wav_path is None:
-                self._q.put(("error", "No audio captured (too short or mic error)."))
+                self._q.put(("error", "No audio captured (too short or mic error).", None))
                 return
+            cache_path = self._cache_audio(wav_path)
             text = transcribe(
-                wav_path,
+                cache_path,
                 api_key=self.cfg["api_key"],
                 api_base_url=self.cfg["api_base_url"],
                 model=self.cfg["model"],
                 language=self.cfg["language"],
             )
             if text:
-                self._q.put(("result", text))
+                self._q.put(("result", text, cache_path))
             else:
-                self._q.put(("error", "Transcription returned empty text."))
+                self._q.put(("error", "Transcription returned empty text.", cache_path))
         except Exception as exc:
-            self._q.put(("error", str(exc)))
-        finally:
-            if wav_path and os.path.exists(wav_path):
+            self._q.put(("error", str(exc), cache_path))
+
+    # ── audio cache ─────────────────────────────────────────────────────────
+
+    def _cache_audio(self, wav_path: str) -> str:
+        cfg.AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        name = datetime.now().strftime("%Y%m%d_%H%M%S") + ".wav"
+        dest = cfg.AUDIO_CACHE_DIR / name
+        shutil.move(wav_path, dest)
+        return str(dest)
+
+    def _prune_audio_cache(self):
+        if not cfg.AUDIO_CACHE_DIR.exists():
+            return
+        max_bytes = self.cfg.get("audio_cache_max_mb", 500) * 1024 * 1024
+        max_age = self.cfg.get("audio_cache_days", 7) * 86400
+        now = time.time()
+        files = sorted(cfg.AUDIO_CACHE_DIR.glob("*.wav"),
+                       key=lambda f: f.stat().st_mtime)
+        total = sum(f.stat().st_size for f in files)
+        for f in files:
+            if (now - f.stat().st_mtime > max_age) or (total > max_bytes):
+                total -= f.stat().st_size
                 try:
-                    os.unlink(wav_path)
+                    f.unlink()
                 except OSError:
                     pass
+
+    def _retry_transcription(self, wav_path: str):
+        if not os.path.exists(wav_path):
+            self._q.put(("error", "Cached audio file no longer exists.", None))
+            return
+        self._q.put(("status", S_PROCESSING))
+
+        def worker():
+            try:
+                text = transcribe(
+                    wav_path,
+                    api_key=self.cfg["api_key"],
+                    api_base_url=self.cfg["api_base_url"],
+                    model=self.cfg["model"],
+                    language=self.cfg["language"],
+                )
+                if text:
+                    self._q.put(("result", text, wav_path))
+                else:
+                    self._q.put(("error", "Retry: empty text.", wav_path))
+            except Exception as exc:
+                self._q.put(("error", f"Retry: {exc}", wav_path))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── transcript persistence ────────────────────────────────────────────────
 
@@ -903,8 +1000,12 @@ class App:
             except Exception:
                 date_key = record.get("date", "unknown")
                 ts = record.get("time", "??:??")
-            self._day_entries.setdefault(date_key, []).append((ts, text))
-            self._latest_text = text
+            wav = record.get("wav_cache")
+            if wav and not os.path.exists(wav):
+                wav = None
+            self._day_entries.setdefault(date_key, []).append((ts, text, wav))
+            if not text.startswith("[ERROR]"):
+                self._latest_text = text
 
         self._update_cost_display()
         self._refresh_day_buttons()
@@ -915,7 +1016,8 @@ class App:
         elif self._day_entries:
             self._show_day(sorted(self._day_entries.keys())[-1])
 
-    def _save_transcript(self, text: str, pasted: bool) -> float:
+    def _save_transcript(self, text: str, pasted: bool,
+                         wav_cache: str | None = None) -> float:
         """Append a JSONL record to ~/.resonance/history.jsonl.
 
         Returns the USD cost of this transcription call.
@@ -936,6 +1038,8 @@ class App:
             "model": model,
             "cost_usd": round(cost, 6),
         }
+        if wav_cache:
+            record["wav_cache"] = wav_cache
         log_file = cfg.CONFIG_DIR / "history.jsonl"
         try:
             cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -992,13 +1096,14 @@ class App:
         self._blink_job = self.root.after(500, lambda: self._blink(not visible))
 
     def _add_history(self, text: str, is_error: bool = False,
-                     ts: str | None = None):
+                     ts: str | None = None, wav_path: str | None = None):
         today = datetime.now().strftime("%Y-%m-%d")
         if ts is None:
             ts = datetime.now().strftime("%H:%M:%S")
 
-        self._day_entries.setdefault(today, []).append((ts, text))
-        self._latest_text = text
+        self._day_entries.setdefault(today, []).append((ts, text, wav_path))
+        if not is_error:
+            self._latest_text = text
 
         if today not in self._day_buttons:
             self._refresh_day_buttons()
@@ -1008,7 +1113,10 @@ class App:
         else:
             if self._placeholder.winfo_ismapped():
                 self._placeholder.pack_forget()
-            entry = HistoryEntry(self._history_frame, ts, text)
+            on_retry = None
+            if wav_path and is_error:
+                on_retry = lambda: self._retry_transcription(wav_path)
+            entry = HistoryEntry(self._history_frame, ts, text, on_retry=on_retry)
             entry.pack(fill="x", padx=8, pady=2)
             self._history.append(entry)
             self._scroll_to_bottom()
@@ -1030,7 +1138,7 @@ class App:
     def _copy_all(self):
         entries = self._day_entries.get(self._selected_date, [])
         if entries:
-            pyperclip.copy("\n".join(text for _, text in entries))
+            pyperclip.copy("\n".join(text for _, text, *_ in entries))
 
     # ── canvas scroll helpers ─────────────────────────────────────────────────
 

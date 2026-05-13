@@ -16,6 +16,7 @@ load_dotenv(_ENV_FILE)
 
 CONFIG_DIR = Path.home() / ".resonance"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+AUDIO_CACHE_DIR = CONFIG_DIR / "audio_cache"
 
 DEFAULTS = {
     "api_key": os.getenv("OPENAI_API_KEY", ""),
@@ -27,6 +28,8 @@ DEFAULTS = {
     "audio_output_device": None,
     "auto_paste": True,
     "always_on_top": False,
+    "audio_cache_max_mb": 500,
+    "audio_cache_days": 7,
 }
 
 
