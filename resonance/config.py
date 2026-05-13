@@ -29,6 +29,7 @@ DEFAULTS = {
     "auto_paste": True,
     "always_on_top": False,
     "audio_cache_max_mb": 500,
+    "audio_cache_delete_after": False,
     "audio_cache_days": 7,
 }
 

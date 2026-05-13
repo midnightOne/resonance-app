@@ -393,6 +393,7 @@ class SettingsPanel(tk.Toplevel):
         self._always_on_top = tk.BooleanVar(value=c["always_on_top"])
         self._start_with_windows = tk.BooleanVar(value=_get_startup_enabled())
         self._cache_max_mb = tk.StringVar(value=str(c.get("audio_cache_max_mb", 500)))
+        self._cache_delete_after = tk.BooleanVar(value=c.get("audio_cache_delete_after", False))
         self._cache_days = tk.StringVar(value=str(c.get("audio_cache_days", 7)))
 
         # Device lists
@@ -487,11 +488,26 @@ class SettingsPanel(tk.Toplevel):
 
         cache_days_frame = tk.Frame(self, bg=BG)
         cache_days_frame.pack(fill="x", **pad)
-        tk.Label(cache_days_frame, text="Keep (days)", fg=TEXT_DIM, bg=BG,
-                 width=14, anchor="w", font=("Segoe UI", 9)).pack(side="left")
+        tk.Checkbutton(cache_days_frame, text="Delete after",
+                       variable=self._cache_delete_after, fg=TEXT, bg=BG,
+                       activebackground=BG, selectcolor=ENTRY_BG,
+                       font=("Segoe UI", 9)).pack(side="left")
         tk.Entry(cache_days_frame, textvariable=self._cache_days, bg=ENTRY_BG,
                  fg=TEXT, insertbackground=TEXT, relief="flat",
-                 font=("Consolas", 10), width=8).pack(side="left")
+                 font=("Consolas", 10), width=4).pack(side="left", padx=(4, 0))
+        tk.Label(cache_days_frame, text="days", fg=TEXT_DIM, bg=BG,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(4, 0))
+
+        open_cache_frame = tk.Frame(self, bg=BG)
+        open_cache_frame.pack(fill="x", **pad)
+        tk.Button(
+            open_cache_frame, text="Open cache folder", fg=TEXT, bg=ACCENT,
+            relief="flat", bd=0, padx=10, pady=3,
+            font=("Segoe UI", 8), cursor="hand2",
+            activebackground=GREEN, activeforeground=BG,
+            command=lambda: (cfg.AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True),
+                             os.startfile(str(cfg.AUDIO_CACHE_DIR))),
+        ).pack(side="left")
 
         tk.Frame(self, height=1, bg=ACCENT).pack(fill="x", pady=(10, 0))
 
@@ -537,6 +553,7 @@ class SettingsPanel(tk.Toplevel):
             c["audio_cache_max_mb"] = int(self._cache_max_mb.get())
         except ValueError:
             pass
+        c["audio_cache_delete_after"] = self._cache_delete_after.get()
         try:
             c["audio_cache_days"] = int(self._cache_days.get())
         except ValueError:
@@ -924,13 +941,15 @@ class App:
         if not cfg.AUDIO_CACHE_DIR.exists():
             return
         max_bytes = self.cfg.get("audio_cache_max_mb", 500) * 1024 * 1024
+        delete_after = self.cfg.get("audio_cache_delete_after", False)
         max_age = self.cfg.get("audio_cache_days", 7) * 86400
         now = time.time()
         files = sorted(cfg.AUDIO_CACHE_DIR.glob("*.wav"),
                        key=lambda f: f.stat().st_mtime)
         total = sum(f.stat().st_size for f in files)
         for f in files:
-            if (now - f.stat().st_mtime > max_age) or (total > max_bytes):
+            too_old = delete_after and (now - f.stat().st_mtime > max_age)
+            if too_old or total > max_bytes:
                 total -= f.stat().st_size
                 try:
                     f.unlink()
