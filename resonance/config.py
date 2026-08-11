@@ -23,7 +23,7 @@ DEFAULTS = {
     "api_base_url": "https://api.openai.com/v1",
     "model": "whisper-1",
     "hotkey": "ctrl+left windows",
-    "language": "en",
+    "language": "",  # empty = auto-detect
     "audio_device": None,
     "audio_output_device": None,
     "auto_paste": True,

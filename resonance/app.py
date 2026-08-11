@@ -309,8 +309,6 @@ class HistoryEntry(tk.Frame):
         super().__init__(parent, bg=BG2, pady=4, padx=6, **kw)
         self.text = text
         self._menu_actions: list[tuple[str, callable]] = []
-        if on_retry:
-            self._menu_actions.append(("Retry transcription", on_retry))
         if on_play:
             self._menu_actions.append(("Play audio", on_play))
         if on_delete:
@@ -337,6 +335,14 @@ class HistoryEntry(tk.Frame):
                              activebackground=GREEN, activeforeground=BG,
                              command=self._copy)
         copy_btn.pack(side="right")
+
+        if on_retry:
+            retry_btn = tk.Button(top, text="Retry", fg=BG, bg=YELLOW,
+                                  relief="flat", bd=0, padx=8, pady=1,
+                                  font=("Segoe UI", 8, "bold"), cursor="hand2",
+                                  activebackground=GREEN, activeforeground=BG,
+                                  command=on_retry)
+            retry_btn.pack(side="right", padx=(0, 4))
 
         body = tk.Label(self, text=text, fg=TEXT, bg=BG2,
                         wraplength=360, justify="left",
@@ -365,6 +371,13 @@ class HistoryEntry(tk.Frame):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DEVICE_DEFAULT_LABEL = "System Default"
+
+# (ISO-639-1 code sent to the API, label shown in the UI)
+_LANG_CHOICES: list[tuple[str, str]] = [
+    ("", "Auto-detect"),
+    ("en", "English"),
+    ("ru", "Russian"),
+]
 
 
 class SettingsPanel(tk.Toplevel):
@@ -412,7 +425,11 @@ class SettingsPanel(tk.Toplevel):
         self._base_url   = tk.StringVar(value=c["api_base_url"])
         self._model      = tk.StringVar(value=c["model"])
         self._hotkey     = tk.StringVar(value=c["hotkey"])
-        self._language   = tk.StringVar(value=c["language"])
+        lang_label = next(
+            (lbl for code, lbl in _LANG_CHOICES if code == c["language"]),
+            _LANG_CHOICES[0][1],  # unknown code → Auto-detect
+        )
+        self._language   = tk.StringVar(value=lang_label)
         self._auto_paste = tk.BooleanVar(value=c["auto_paste"])
         self._always_on_top = tk.BooleanVar(value=c["always_on_top"])
         self._start_with_windows = tk.BooleanVar(value=_get_startup_enabled())
@@ -471,11 +488,12 @@ class SettingsPanel(tk.Toplevel):
         lang_frame.pack(fill="x", **pad)
         tk.Label(lang_frame, text="Language", fg=TEXT_DIM, bg=BG,
                  width=14, anchor="w", font=("Segoe UI", 9)).pack(side="left")
-        tk.Entry(lang_frame, textvariable=self._language, bg=ENTRY_BG,
-                 fg=TEXT, insertbackground=TEXT, relief="flat",
-                 font=("Consolas", 10), width=14).pack(side="left")
-        tk.Label(lang_frame, text=" (blank = auto-detect)", fg=TEXT_DIM, bg=BG,
-                 font=("Segoe UI", 8)).pack(side="left")
+        ttk.Combobox(lang_frame, textvariable=self._language,
+                     values=[lbl for _, lbl in _LANG_CHOICES],
+                     state="readonly", style="Dark.TCombobox",
+                     width=16).pack(side="left")
+        tk.Label(lang_frame, text=" (Auto = detected per recording)",
+                 fg=TEXT_DIM, bg=BG, font=("Segoe UI", 8)).pack(side="left")
 
         chk_frame = tk.Frame(self, bg=BG)
         chk_frame.pack(fill="x", **pad)
@@ -568,7 +586,8 @@ class SettingsPanel(tk.Toplevel):
         c["api_base_url"] = self._base_url.get().strip()
         c["model"]        = self._model.get().strip()
         c["hotkey"]       = self._hotkey.get().strip()
-        c["language"]     = self._language.get().strip()
+        c["language"]     = next(
+            (code for code, lbl in _LANG_CHOICES if lbl == self._language.get()), "")
         c["auto_paste"]   = self._auto_paste.get()
         c["always_on_top"] = self._always_on_top.get()
         c["audio_device"]        = self._resolve_device(self._in_dev_var,  self._in_device_list)
@@ -1281,5 +1300,60 @@ class App:
         self.root.destroy()
 
 
+_LOCK_FILE = cfg.CONFIG_DIR / ".lock"
+
+
+def _pid_running(pid: int) -> bool:
+    """Return True if a process with this PID is still alive.
+
+    NOTE: os.kill(pid, 0) must not be used on Windows – instead of probing,
+    it unconditionally TERMINATES the target process.
+    """
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    h = ctypes.windll.kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return False
+    try:
+        code = ctypes.c_ulong(0)
+        if not ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def _acquire_instance_lock() -> bool:
+    """Ensure only one Resonance instance runs at a time (lockfile approach)."""
+    cfg.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if _LOCK_FILE.exists():
+            pid = int(_LOCK_FILE.read_text().strip())
+            if _pid_running(pid):
+                return False  # another instance is alive
+            # stale lock, process is gone
+        _LOCK_FILE.write_text(str(os.getpid()))
+        return True
+    except Exception:
+        return True  # don't block launch on lock errors
+
+
+def _release_instance_lock():
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def run():
-    App()
+    if not _acquire_instance_lock():
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showwarning("Resonance", "Resonance is already running.")
+        root.destroy()
+        return
+    try:
+        App()
+    finally:
+        _release_instance_lock()
